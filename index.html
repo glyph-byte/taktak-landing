@@ -190,9 +190,9 @@ html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#ececea}
   canvas.width=w;canvas.height=h;
   const image=ctx.createImageData(w,h),pixels=image.data,unit=255/(2*max);
   for(let j=0;j<h;j++){
-   const y=(j+.5)/density-margin,fromY=y-cy;
+   const y=(j+.5)*gh/h-margin,fromY=y-cy;
    for(let i=0;i<w;i++){
-    const x=(i+.5)/density-margin,fromX=x-cx;
+    const x=(i+.5)*gw/w-margin,fromX=x-cx;
     const r=(fromX*fromX+fromY*fromY)/radius2,f=1+strength*r*r;
     const dx=Math.min(maxX,Math.max(minX,cx+fromX*f))-x;
     const dy=Math.min(maxY,Math.max(minY,cy+fromY*f))-y;
@@ -2580,20 +2580,42 @@ fn mainFragment(
   window.mountMarqueeCursor = el => document.body.append(el);
 window.mountMarqueeLayer=async(anchor,track)=>{
  const child=anchor.ownerDocument.defaultView,doc=child.document;
- // Phones use native overflow scrolling: no ticker, WebGL context or autoplay.
  if(window.__taktakMobile()){
-  anchor.style.cssText+=';overflow-x:auto;overflow-y:hidden;touch-action:pan-x pan-y;pointer-events:auto';
-  track.style.cssText='display:flex;width:max-content;height:100%;align-items:center;gap:24px;transform:none';
-  anchor.tabIndex=0;anchor.setAttribute('role','region');anchor.setAttribute('aria-label','Предмети — гортайте вліво або вправо');
-  let theme='';
-  async function setItems(items,name='custom'){
-   if(!Array.isArray(items)||items.some(i=>!i.id||!i.src||!(i.height>0))||new Set(items.map(i=>i.id)).size!==items.length)throw Error('Invalid marquee items');
-   const fragment=doc.createDocumentFragment();
-   for(const item of items){const img=doc.createElement('img');img.src=item.src;img.alt=item.alt||'';img.loading='lazy';img.decoding='async';img.draggable=false;img.style.cssText=`height:${item.height*.075}px;width:auto;max-width:none;flex:none`;fragment.append(img)}
-   track.replaceChildren(fragment);anchor.scrollLeft=0;theme=name;
+  anchor.style.cssText+=';overflow:hidden;touch-action:pan-y;pointer-events:auto';
+  track.style.cssText='display:flex;width:max-content;height:100%;align-items:center;gap:24px;will-change:transform';
+  anchor.tabIndex=0;anchor.setAttribute('role','region');anchor.setAttribute('aria-label','Предмети — перетягуйте вліво або вправо');
+  const reduced=child.matchMedia('(prefers-reduced-motion:reduce)');
+  let animation=null,total=0,theme='',items=[],revision=0,drag=null,visible=true,paused=false;
+  const duration=60000,wrap=n=>((n%1)+1)%1;
+  const phase=()=>animation?wrap(Number(animation.currentTime||0)/duration):0;
+  function run(){if(!animation)return;if(!drag&&visible&&!doc.hidden&&!paused&&!reduced.matches)animation.play();else animation.pause()}
+  function layout(){
+   const saved=phase();if(animation)animation.cancel();animation=null;
+   track.replaceChildren(...items);total=items.reduce((n,img)=>n+img.naturalWidth/img.naturalHeight*parseFloat(img.style.height)+24,0);
+   if(!total)return;
+   let width=0,i=0;const required=anchor.clientWidth+Math.max(...items.map(img=>img.naturalWidth/img.naturalHeight*parseFloat(img.style.height)));
+   while(width<required){const img=items[i++%items.length],copy=img.cloneNode(true);copy.setAttribute('aria-hidden','true');track.append(copy);width+=img.naturalWidth/img.naturalHeight*parseFloat(img.style.height)+24}
+   animation=track.animate([{transform:'translate3d(0,0,0)'},{transform:`translate3d(${-total}px,0,0)`}],{duration,iterations:Infinity,easing:'linear'});
+   animation.pause();animation.currentTime=saved*duration;
+   if(drag){drag.phase=saved;drag.start=drag.last}run();
+  }
+  async function setItems(data,name='custom'){
+   if(!Array.isArray(data)||data.some(i=>!i.id||!i.src||!(i.height>0))||new Set(data.map(i=>i.id)).size!==data.length)throw Error('Invalid marquee items');
+   const ticket=++revision;
+   const images=await Promise.all(data.map(async item=>{const img=doc.createElement('img');img.src=item.src;img.alt=item.alt||'';img.decoding='async';img.draggable=false;img.style.cssText=`height:${item.height*.075}px;width:auto;max-width:none;flex:none`;await img.decode();return img}));
+   if(ticket!==revision)return;items=images;theme=name;layout();
   }
   async function setTheme(name){const data=window.TAKTAK_MARQUEE.themes[name];if(!data)throw Error('Unknown theme');await setItems(data.items,name)}
-  window.taktakMarquee={setItems,setTheme,getState:()=>({theme,count:track.children.length,renderer:'native-scroll'})};
+  anchor.addEventListener('pointerdown',e=>{if(!animation||drag||!e.isPrimary||e.button!==0)return;drag={id:e.pointerId,start:e.clientX,last:e.clientX,phase:phase()};run();anchor.setPointerCapture(e.pointerId)});
+  anchor.addEventListener('pointermove',e=>{if(!drag||drag.id!==e.pointerId)return;drag.last=e.clientX;animation.currentTime=wrap(drag.phase-(drag.last-drag.start)/total)*duration});
+  function finish(e){if(!drag||drag.id!==e.pointerId)return;const id=drag.id;drag=null;if(anchor.hasPointerCapture(id))anchor.releasePointerCapture(id);run()}
+  for(const type of ['pointerup','pointercancel','lostpointercapture'])anchor.addEventListener(type,finish);
+  anchor.addEventListener('keydown',e=>{if(!animation||!['ArrowLeft','ArrowRight',' '].includes(e.key))return;e.preventDefault();if(e.key===' ')paused=!paused;else animation.currentTime=wrap(phase()+(e.key==='ArrowRight'?180:-180)/total)*duration;run()});
+  anchor.addEventListener('dragstart',e=>e.preventDefault());
+  new child.IntersectionObserver(es=>{visible=es[0].isIntersecting;run()}).observe(anchor);
+  let resize=0;new child.ResizeObserver(()=>{child.cancelAnimationFrame(resize);resize=child.requestAnimationFrame(layout)}).observe(anchor);
+  doc.addEventListener('visibilitychange',run);reduced.addEventListener('change',run);
+  window.taktakMarquee={setItems,setTheme,getState:()=>({theme,count:items.length,renderer:'native-animation'})};
   await setTheme(window.TAKTAK_MARQUEE.activeTheme);return;
  }
  const layer=document.createElement('div');layer.className='marquee-layer';layer.setAttribute('aria-hidden','true');
